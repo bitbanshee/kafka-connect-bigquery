@@ -19,6 +19,8 @@
 
 package com.wepay.kafka.connect.bigquery.convert;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.cloud.bigquery.InsertAllRequest.RowToInsert;
 import com.wepay.kafka.connect.bigquery.api.KafkaSchemaRecordType;
 import com.wepay.kafka.connect.bigquery.convert.logicaltype.DebeziumLogicalConverters;
@@ -30,11 +32,12 @@ import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.sink.SinkRecord;
-
+import java.io.ByteArrayInputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -53,7 +56,9 @@ public class BigQueryRecordConverter implements RecordConverter<Map<String, Obje
             Boolean.class, Character.class, Byte.class, Short.class,
                   Integer.class, Long.class, Float.class, Double.class, String.class)
           );
+  private final ObjectMapper jsonMapper = new ObjectMapper();
   private final boolean shouldConvertSpecialDouble;
+  private final Set<String> jsonFields;
   private boolean shouldConvertDebeziumTimestampToInteger;
 
   static {
@@ -62,9 +67,14 @@ public class BigQueryRecordConverter implements RecordConverter<Map<String, Obje
     new KafkaLogicalConverters();
   }
 
-  public BigQueryRecordConverter(boolean shouldConvertDoubleSpecial, boolean shouldConvertDebeziumTimestampToInteger) {
+  public BigQueryRecordConverter(boolean shouldConvertDoubleSpecial, boolean shouldConvertDebeziumTimestampToInteger, Set<String> jsonFields) {
     this.shouldConvertSpecialDouble = shouldConvertDoubleSpecial;
     this.shouldConvertDebeziumTimestampToInteger = shouldConvertDebeziumTimestampToInteger;
+    this.jsonFields = new HashSet<String>(jsonFields);
+  }
+  
+  public BigQueryRecordConverter(boolean shouldConvertDoubleSpecial, boolean shouldConvertDebeziumTimestampToInteger) {
+    this(shouldConvertDoubleSpecial, shouldConvertDebeziumTimestampToInteger, Collections.emptySet());
   }
 
   /**
@@ -90,7 +100,7 @@ public class BigQueryRecordConverter implements RecordConverter<Map<String, Obje
       throw new
           ConversionConnectException("Top-level Kafka Connect schema must be of type 'struct'");
     }
-    return convertStruct(kafkaConnectStruct, kafkaConnectSchema);
+    return convertStruct(kafkaConnectStruct, kafkaConnectSchema, true);
   }
 
   @SuppressWarnings("unchecked")
@@ -133,6 +143,10 @@ public class BigQueryRecordConverter implements RecordConverter<Map<String, Obje
   }
 
   private Object convertObject(Object kafkaConnectObject, Schema kafkaConnectSchema) {
+    return convertObject(kafkaConnectObject, kafkaConnectSchema, false);
+  }
+
+  private Object convertObject(Object kafkaConnectObject, Schema kafkaConnectSchema, boolean shouldBeJSON) {
     if (kafkaConnectObject == null) {
       if (kafkaConnectSchema.isOptional()) {
         // short circuit converting the object
@@ -142,6 +156,8 @@ public class BigQueryRecordConverter implements RecordConverter<Map<String, Obje
             kafkaConnectSchema.name() + " is not optional, but converting object had null value");
       }
     }
+    if (shouldBeJSON)
+      return convertJSON(kafkaConnectObject, kafkaConnectSchema);
     if (LogicalConverterRegistry.isRegisteredLogicalType(kafkaConnectSchema.name())) {
       return convertLogical(kafkaConnectObject, kafkaConnectSchema);
     }
@@ -170,7 +186,49 @@ public class BigQueryRecordConverter implements RecordConverter<Map<String, Obje
     }
   }
 
+  @SuppressWarnings("unchecked")
+  private String convertJSON(Object kafkaConnectObject,
+                             Schema kafkaConnectSchema) {
+    Schema.Type kafkaConnectSchemaType = kafkaConnectSchema.type();
+    try {
+      switch (kafkaConnectSchemaType) {
+        case ARRAY:
+          return jsonMapper.writeValueAsString(
+            convertArray(kafkaConnectObject, kafkaConnectSchema));
+        case MAP:
+          return jsonMapper.writeValueAsString(
+            convertMap(kafkaConnectObject, kafkaConnectSchema));
+        case STRUCT:
+          return jsonMapper.writeValueAsString(
+            convertStruct(kafkaConnectObject, kafkaConnectSchema));
+        // only maps or lists from string to json
+        case STRING:
+          String s = (String)kafkaConnectObject;
+          try {
+            TypeReference<HashMap<String,Object>> mapRef = new TypeReference<HashMap<String,Object>>() {};
+            jsonMapper.readValue(new ByteArrayInputStream(s.getBytes()), mapRef);
+            return s;
+          } catch (Exception e) {
+            TypeReference<ArrayList<Object>> mapRef = new TypeReference<ArrayList<Object>>() {};
+            jsonMapper.readValue(new ByteArrayInputStream(s.getBytes()), mapRef);
+            return s;
+          }
+        default:
+          throw new ConversionConnectException("Schema type cannot be converted to JSON: " + kafkaConnectSchemaType);
+      }
+    } catch (Exception e) {
+      if (e instanceof ConversionConnectException)
+        throw (ConversionConnectException)e;
+      throw new ConversionConnectException(
+        String.format("Value whose schema is %s cannot be converted to JSON: ", kafkaConnectSchemaType), e);
+    }
+  }
+
   private Map<String, Object> convertStruct(Object kafkaConnectObject, Schema kafkaConnectSchema) {
+    return convertStruct(kafkaConnectObject, kafkaConnectSchema, false);
+  }
+
+  private Map<String, Object> convertStruct(Object kafkaConnectObject, Schema kafkaConnectSchema, boolean isRoot) {
     Map<String, Object> bigQueryRecord = new HashMap<>();
     List<Field> kafkaConnectSchemaFields = kafkaConnectSchema.fields();
     Struct kafkaConnectStruct = (Struct) kafkaConnectObject;
@@ -178,14 +236,15 @@ public class BigQueryRecordConverter implements RecordConverter<Map<String, Obje
       // ignore empty structures
       boolean isEmptyStruct = kafkaConnectField.schema().type() == Schema.Type.STRUCT &&
           kafkaConnectField.schema().fields().isEmpty();
-      if (!isEmptyStruct) {
-        Object bigQueryObject = convertObject(
-            kafkaConnectStruct.get(kafkaConnectField.name()),
-            kafkaConnectField.schema()
-        );
-        if (bigQueryObject != null) {
-          bigQueryRecord.put(kafkaConnectField.name(), bigQueryObject);
-        }
+      if (isEmptyStruct)
+        continue;
+      Object bigQueryObject = convertObject(
+        kafkaConnectStruct.get(kafkaConnectField.name()),
+        kafkaConnectField.schema(),
+        isRoot && jsonFields.stream().anyMatch(f -> f.equals(kafkaConnectField.name()))
+      );
+      if (bigQueryObject != null) {
+        bigQueryRecord.put(kafkaConnectField.name(), bigQueryObject);
       }
     }
     return bigQueryRecord;

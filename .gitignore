@@ -21,6 +21,8 @@ target/
 .settings
 .metadata
 
+.vscode
+
 key.json
 
 test.conf

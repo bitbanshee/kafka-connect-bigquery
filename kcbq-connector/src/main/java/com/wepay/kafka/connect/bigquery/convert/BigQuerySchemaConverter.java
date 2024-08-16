@@ -32,10 +32,13 @@ import com.wepay.kafka.connect.bigquery.utils.FieldNameSanitizer;
 import org.apache.kafka.connect.data.Schema;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -85,15 +88,21 @@ public class BigQuerySchemaConverter implements SchemaConverter<com.google.cloud
 
   private final boolean allFieldsNullable;
   private final boolean sanitizeFieldNames;
+  private final Set<String> jsonFields;
 
   // visible for testing
   BigQuerySchemaConverter(boolean allFieldsNullable) {
-    this(allFieldsNullable, false);
+    this(allFieldsNullable, false, Collections.emptySet());
   }
 
   public BigQuerySchemaConverter(boolean allFieldsNullable, boolean sanitizeFieldNames) {
+    this(allFieldsNullable, sanitizeFieldNames, Collections.emptySet());
+  }
+
+  public BigQuerySchemaConverter(boolean allFieldsNullable, boolean sanitizeFieldNames, Set<String> jsonFields) {
     this.allFieldsNullable = allFieldsNullable;
     this.sanitizeFieldNames = sanitizeFieldNames;
+    this.jsonFields = new HashSet<String>(jsonFields);
   }
 
   /**
@@ -117,7 +126,10 @@ public class BigQuerySchemaConverter implements SchemaConverter<com.google.cloud
 
     List<com.google.cloud.bigquery.Field> fields = kafkaConnectSchema.fields().stream()
         .flatMap(kafkaConnectField ->
-          convertField(kafkaConnectField.schema(), kafkaConnectField.name())
+          convertField(
+            kafkaConnectField.schema(),
+            kafkaConnectField.name(),
+            jsonFields.stream().anyMatch(f -> f.equals(kafkaConnectField.name())))
           .map(Stream::of)
           .orElse(Stream.empty())
         )
@@ -158,13 +170,21 @@ public class BigQuerySchemaConverter implements SchemaConverter<com.google.cloud
 
   private Optional<com.google.cloud.bigquery.Field.Builder> convertField(Schema kafkaConnectSchema,
                                                                          String fieldName) {
+    return convertField(kafkaConnectSchema, fieldName, false);
+  }
+
+  private Optional<com.google.cloud.bigquery.Field.Builder> convertField(Schema kafkaConnectSchema,
+                                                                         String fieldName,
+                                                                         boolean shouldBeJSON) {
     Optional<com.google.cloud.bigquery.Field.Builder> result;
     Schema.Type kafkaConnectSchemaType = kafkaConnectSchema.type();
     if (sanitizeFieldNames) {
       fieldName = FieldNameSanitizer.sanitizeName(fieldName);
     }
 
-    if (LogicalConverterRegistry.isRegisteredLogicalType(kafkaConnectSchema.name())) {
+    if (shouldBeJSON) {
+      result = Optional.of(convertJSON(kafkaConnectSchema, fieldName));
+    } else if (LogicalConverterRegistry.isRegisteredLogicalType(kafkaConnectSchema.name())) {
       result = Optional.of(convertLogical(kafkaConnectSchema, fieldName));
     } else if (PRIMITIVE_TYPE_MAP.containsKey(kafkaConnectSchemaType)) {
       result = Optional.of(convertPrimitive(kafkaConnectSchema, fieldName));
@@ -272,5 +292,10 @@ public class BigQuerySchemaConverter implements SchemaConverter<com.google.cloud
         LogicalConverterRegistry.getConverter(kafkaConnectSchema.name());
     converter.checkEncodingType(kafkaConnectSchema.type());
     return com.google.cloud.bigquery.Field.newBuilder(fieldName, converter.getBQSchemaType());
+  }
+
+  private com.google.cloud.bigquery.Field.Builder convertJSON(Schema kafkaConnectSchema,
+                                                                   String fieldName) {
+    return com.google.cloud.bigquery.Field.newBuilder(fieldName, LegacySQLTypeName.JSON);
   }
 }

@@ -28,7 +28,6 @@ import com.wepay.kafka.connect.bigquery.convert.BigQuerySchemaConverter;
 import com.wepay.kafka.connect.bigquery.convert.RecordConverter;
 import com.wepay.kafka.connect.bigquery.convert.SchemaConverter;
 import com.wepay.kafka.connect.bigquery.retrieve.IdentitySchemaRetriever;
-import com.wepay.kafka.connect.bigquery.utils.FieldNameSanitizer;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigDef;
@@ -541,6 +540,14 @@ public class BigQuerySinkConfig extends AbstractConfig {
   private static final ConfigDef.Type ENABLE_RETRIES_TYPE = ConfigDef.Type.BOOLEAN;
   public static final Boolean ENABLE_RETRIES_DEFAULT = true;
   private static final ConfigDef.Importance ENABLE_RETRIES_IMPORTANCE = ConfigDef.Importance.MEDIUM;
+
+  public static final String BIGQUERY_JSON_FIELD_NAMES_CONFIG = "value.json.fields";
+  private static final ConfigDef.Type BIGQUERY_JSON_FIELD_NAMES_TYPE = ConfigDef.Type.LIST;
+  private static final List<String> BIGQUERY_JSON_FIELD_NAMES_DEFAULT = null;
+  private static final ConfigDef.Importance BIGQUERY_JSON_FIELD_NAMES_IMPORTANCE = ConfigDef.Importance.LOW;
+  private static final String BIGQUERY_JSON_FIELD_NAMES_DOC =
+      "List of fields whose values should be converted and inserted as JSON in BigQuery, separated by commas";
+
   /**
    * Return the ConfigDef object used to define this config's fields.
    *
@@ -557,8 +564,8 @@ public class BigQuerySinkConfig extends AbstractConfig {
             TOPICS_GROUP,
             TOPICS_ORDER_IN_GROUP,
             TOPICS_WIDTH,
-            TOPICS_DISPLAY)
-        .define(
+            TOPICS_DISPLAY
+        ).define(
             TOPICS_REGEX_CONFIG,
             TOPICS_REGEX_TYPE,
             TOPICS_REGEX_DEFAULT,
@@ -567,8 +574,8 @@ public class BigQuerySinkConfig extends AbstractConfig {
             TOPICS_REGEX_GROUP,
             TOPICS_REGEX_ORDER_IN_GROUP,
             TOPICS_REGEX_WIDTH,
-            TOPICS_REGEX_DISPLAY)
-        .define(
+            TOPICS_REGEX_DISPLAY
+        ).define(
             ENABLE_BATCH_CONFIG,
             ENABLE_BATCH_TYPE,
             ENABLE_BATCH_DEFAULT,
@@ -834,10 +841,10 @@ public class BigQuerySinkConfig extends AbstractConfig {
             BIGQUERY_PARTITION_EXPIRATION_IMPORTANCE,
             BIGQUERY_PARTITION_EXPIRATION_DOC
         ).defineInternal(
-                    CONNECTOR_RUNTIME_PROVIDER_CONFIG,
-                    CONNECTOR_RUNTIME_PROVIDER_TYPE,
-                    CONNECTOR_RUNTIME_PROVIDER_DEFAULT,
-                    CONNECTOR_RUNTIME_PROVIDER_IMPORTANCE
+            CONNECTOR_RUNTIME_PROVIDER_CONFIG,
+            CONNECTOR_RUNTIME_PROVIDER_TYPE,
+            CONNECTOR_RUNTIME_PROVIDER_DEFAULT,
+            CONNECTOR_RUNTIME_PROVIDER_IMPORTANCE
         ).define(
             MAX_RETRIES_CONFIG,
             MAX_RETRIES_TYPE,
@@ -850,6 +857,12 @@ public class BigQuerySinkConfig extends AbstractConfig {
             ENABLE_RETRIES_TYPE,
             ENABLE_RETRIES_DEFAULT,
             ENABLE_RETRIES_IMPORTANCE
+        ).define(
+          BIGQUERY_JSON_FIELD_NAMES_CONFIG,
+          BIGQUERY_JSON_FIELD_NAMES_TYPE,
+          BIGQUERY_JSON_FIELD_NAMES_DEFAULT,
+          BIGQUERY_JSON_FIELD_NAMES_IMPORTANCE,
+          BIGQUERY_JSON_FIELD_NAMES_DOC
         );
   }
 
@@ -941,7 +954,8 @@ public class BigQuerySinkConfig extends AbstractConfig {
   public SchemaConverter<Schema> getSchemaConverter() {
     return new BigQuerySchemaConverter(
         getBoolean(ALL_BQ_FIELDS_NULLABLE_CONFIG),
-        getBoolean(SANITIZE_FIELD_NAME_CONFIG));
+        getBoolean(SANITIZE_FIELD_NAME_CONFIG),
+        getConvertToJSONFieldNames().orElse(Collections.emptySet()));
   }
 
   /**
@@ -949,7 +963,10 @@ public class BigQuerySinkConfig extends AbstractConfig {
    * @return a {@link RecordConverter} for BigQuery.
    */
   public RecordConverter<Map<String, Object>> getRecordConverter() {
-    return new BigQueryRecordConverter(getBoolean(CONVERT_DOUBLE_SPECIAL_VALUES_CONFIG), getBoolean(CONVERT_DEBEZIUM_TIMESTAMP_TO_INTEGER_CONFIG));
+    return new BigQueryRecordConverter(
+      getBoolean(CONVERT_DOUBLE_SPECIAL_VALUES_CONFIG),
+      getBoolean(CONVERT_DEBEZIUM_TIMESTAMP_TO_INTEGER_CONFIG),
+      getConvertToJSONFieldNames().orElse(Collections.emptySet()));
   }
 
   /**
@@ -1103,6 +1120,17 @@ public class BigQuerySinkConfig extends AbstractConfig {
         .ofNullable(getList(BIGQUERY_CLUSTERING_FIELD_NAMES_CONFIG))
         // With Java 11 there's Predicate::not, but for now we have to just manually invert the isEmpty check
         .filter(l -> !l.isEmpty());
+  }
+
+  /**
+   * Returns the field names whose values should be converted to JSON.
+   * 
+   * @return List of Strings that represent the field names.
+   */
+  public Optional<Set<String>> getConvertToJSONFieldNames() {
+    return Optional.ofNullable(getList(BIGQUERY_JSON_FIELD_NAMES_CONFIG))
+        .filter(l -> !l.isEmpty())
+        .map(l -> (Set<String>)new HashSet<String>(l));
   }
 
   protected BigQuerySinkConfig(ConfigDef config, Map<String, String> properties) {
